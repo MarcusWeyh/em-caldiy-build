@@ -1,0 +1,233 @@
+# Baut das Cal.diy-Image für Effizienzmaster und legt es in ghcr.io ab.
+# Herkunft: Vorlage infra/hauptserver/caldiy/github-actions-caldiy-image.yml im Haupt-Repo,
+# Notiz brain/15-plattform/caldiy-plausible-deploy-2026-11.md, Abschnitt 2.1.
+#
+# Das ist KEINE Deploy-Datei. Der Workflow baut und legt ab, er deployt nichts. Coolify zieht
+# das Image erst, wenn die Projektleitung die Referenz mit Digest in der Compose-Datei einträgt
+# und dort auf Deploy drückt.
+#
+# Geheimnisse: keine außer dem automatischen GITHUB_TOKEN, und den bekommt nur der letzte
+# Schritt (Push nach ghcr.io). Die Wegwerf-Datenbank läuft ohne Passwort (trust) und lebt nur
+# im Runner. NEXTAUTH_SECRET und CALENDSO_ENCRYPTION_KEY bleiben beim Build auf den
+# Platzhaltern des Dockerfiles; die echten Werte setzt Coolify zur Laufzeit. Das Repo ist
+# öffentlich und damit auch die Protokolle der Läufe: Hier wird nie ein echter Wert ausgegeben.
+#
+# Neuer Cal.diy-Stand: CALDIY_SHA unten ändern (voller SHA, Zweig main von calcom/cal.diy),
+# committen, Workflow von Hand starten. Der Pin steht in der Datei und nicht in einem
+# Eingabefeld, damit die Historie dieses Repos zeigt, welcher Stand wann gebaut wurde.
+#
+# Grün bleibt dieser Lauf fälschlich, wenn
+# - die Seite zwar startet, aber gegen eine andere PostgreSQL-Fassung migriert wurde als am
+#   Server. Deshalb läuft der Rauchtest gegen dasselbe Image wie die gemeinsame Instanz
+#   (pgvector/pgvector:pg18). Der Tag wandert: Der Test belegt den Stand zum Zeitpunkt des Laufs.
+# - die Registrierung nur zur Laufzeit gesperrt ist. Deshalb setzt der Rauchtest
+#   NEXT_PUBLIC_DISABLE_SIGNUP bewusst NICHT und verlangt 403 mit "Signup is disabled".
+#   Die Sperre kann dann nur aus dem Build stammen.
+# - die Google-Fonts-Adresse im gebauten Mailcode in anderer Schreibweise übrig bleibt, als die
+#   Prüfung am Image sucht (etwa zusammengesetzt aus Teilstücken). Hingenommen. Dass die Prüfung
+#   überhaupt den Mailcode sieht, belegt eine Kontrollzeichenkette aus derselben Datei; fehlt
+#   die, bricht der Lauf ab, statt nichts zu finden.
+
+name: Cal.diy-Image bauen
+
+on:
+  workflow_dispatch:
+    inputs:
+      google_fonts_entfernen:
+        description: "Google-Fonts-Einbindung aus den Mailvorlagen entfernen (EmailHead.tsx). Standard ja: datensparsam. Entscheidung Marcus."
+        type: boolean
+        required: true
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: caldiy-image
+  cancel-in-progress: false
+
+env:
+  # calcom/cal.diy, Zweig main, Stand 03.11.2026 ("chore(atoms): stop publishing @calcom/atoms from cal.diy (#30445)")
+  CALDIY_SHA: 2eb48eccd8aca8a0c0ffabf28cf92e298b33ecee
+  WEBAPP_URL: https://termin.effizienzmaster.de
+  IMAGE_NAME: ghcr.io/marcusweyh/em-caldiy
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bauen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    services:
+      datenbank:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: calendso
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      BUILD_DB_URL: postgresql://postgres@localhost:5432/calendso
+      FONTS_ENTFERNEN: ${{ inputs.google_fonts_entfernen }}
+    steps:
+      - name: Pin und feste Werte prüfen
+        run: |
+          [[ "$CALDIY_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "CALDIY_SHA ist kein voller Commit-SHA"; exit 1; }
+          [[ "$WEBAPP_URL" =~ ^https://[a-z0-9.-]+$ ]] || { echo "WEBAPP_URL hat ein unerwartetes Format"; exit 1; }
+          [[ "$FONTS_ENTFERNEN" == "true" || "$FONTS_ENTFERNEN" == "false" ]] || { echo "google_fonts_entfernen unerwartet: $FONTS_ENTFERNEN"; exit 1; }
+
+      - name: Platz auf dem Runner schaffen
+        # Der Cal.diy-Build braucht viel Platte [ungeprüft, ob es ohne diesen Schritt reicht].
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h /
+
+      - name: Cal.diy auschecken (fester Commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: calcom/cal.diy
+          ref: ${{ env.CALDIY_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Commit und Lizenz prüfen, Lizenzhinweis ins Image legen
+        run: |
+          test "$(git rev-parse HEAD)" = "$CALDIY_SHA" || { echo "Ausgecheckter Stand ist nicht CALDIY_SHA"; exit 1; }
+          head -1 LICENSE | grep -q "MIT License" || { echo "Lizenz ist nicht MIT"; exit 1; }
+          # Das Dockerfile kopiert die LICENSE aus der Wurzel nicht ins Image, apps/web dagegen ganz.
+          # MIT verlangt den Hinweis in jeder Kopie, das Image ist öffentlich.
+          cp LICENSE apps/web/LICENSE.cal.diy
+
+      - name: Google Fonts aus den Mailvorlagen entfernen
+        if: ${{ inputs.google_fonts_entfernen }}
+        run: |
+          f=packages/emails/src/components/EmailHead.tsx
+          test -f "$f" || { echo "$f fehlt, Upstream hat sich geändert. Patch prüfen."; exit 1; }
+          vorher="$(grep -c 'fonts\.googleapis\.com' "$f" || true)"
+          sed -i \
+            -e 's#<link href="https://fonts\.googleapis\.com/[^"]*" rel="stylesheet" type="text/css"/>##' \
+            -e 's#<style type="text/css">@import url(https://fonts\.googleapis\.com/[^)]*);</style>##' \
+            "$f"
+          if grep -n 'fonts\.googleapis\.com' "$f"; then
+            echo "fonts.googleapis.com steht noch in $f. Abbruch."
+            exit 1
+          fi
+          echo "Treffer in $f vorher: $vorher, nachher: 0"
+          git --no-pager diff -- "$f"
+          echo "Weitere Fundstellen unter packages/emails (nur zur Information, nicht verändert):"
+          grep -rn 'fonts\.googleapis\.com' packages/emails || echo "keine"
+
+      - name: Öffentliche Build-Werte setzen
+        # Nur Werte, die ohnehin im Browser landen. Next.js liest apps/web/.env.production
+        # beim Build [ungeprüft für diesen Dockerfile-Ablauf, der Rauchtest prüft die Sperre].
+        run: |
+          cat > apps/web/.env.production <<'EOF'
+          NEXT_PUBLIC_DISABLE_SIGNUP=true
+          NEXT_PUBLIC_APP_NAME=Effizienzmaster Termine
+          NEXT_PUBLIC_COMPANY_NAME=Effizienzmaster
+          NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS=
+          EOF
+
+      - name: Image bauen
+        run: |
+          kurz="${CALDIY_SHA:0:8}"
+          if [ "$FONTS_ENTFERNEN" = "true" ]; then tag="$kurz"; else tag="${kurz}-mit-google-fonts"; fi
+          bild="${IMAGE_NAME}:${tag}"
+          echo "BILD=$bild" >> "$GITHUB_ENV"
+          docker build --network host \
+            --build-arg NEXT_PUBLIC_WEBAPP_URL="$WEBAPP_URL" \
+            --build-arg NEXT_PUBLIC_LICENSE_CONSENT=agree \
+            --build-arg CALCOM_TELEMETRY_DISABLED=1 \
+            --build-arg NEXT_PUBLIC_WEBSITE_PRIVACY_POLICY_URL=https://effizienzmaster.de/datenschutz/ \
+            --build-arg NEXT_PUBLIC_WEBSITE_TERMS_URL=https://effizienzmaster.de/impressum/ \
+            --build-arg DATABASE_URL="$BUILD_DB_URL" \
+            --label org.opencontainers.image.source=https://github.com/MarcusWeyh/em-caldiy-build \
+            --label org.opencontainers.image.revision="$CALDIY_SHA" \
+            --label org.opencontainers.image.licenses=MIT \
+            --label "org.opencontainers.image.description=Cal.diy (calcom/cal.diy) für termin.effizienzmaster.de" \
+            --label de.effizienzmaster.google-fonts-entfernt="$FONTS_ENTFERNEN" \
+            -t "$bild" .
+
+      - name: Rauchtest gegen PostgreSQL 18
+        run: |
+          # NEXT_PUBLIC_DISABLE_SIGNUP fehlt hier mit Absicht, siehe Kopf der Datei.
+          docker run -d --name probe --network host \
+            -e DATABASE_URL="$BUILD_DB_URL" -e DATABASE_DIRECT_URL="$BUILD_DB_URL" \
+            -e DATABASE_HOST=localhost:5432 \
+            -e NEXT_PUBLIC_WEBAPP_URL="$WEBAPP_URL" \
+            -e NEXTAUTH_URL="$WEBAPP_URL" \
+            -e NEXTAUTH_SECRET="$(openssl rand -base64 32)" \
+            -e CALENDSO_ENCRYPTION_KEY="$(openssl rand -hex 16)" \
+            -e CALCOM_TELEMETRY_DISABLED=1 \
+            "$BILD"
+          code=""
+          for i in $(seq 1 60); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/auth/login || true)"
+            if [ "$code" = "200" ] || [ "$code" = "307" ]; then echo "Start ok ($code)"; break; fi
+            sleep 10
+          done
+          if [ "$code" != "200" ] && [ "$code" != "307" ]; then docker logs probe 2>&1 | tail -100; exit 1; fi
+          docker logs probe 2>&1 | grep -i -E "migration|applied" | tail -5 || true
+          # Wegwerf-Kennwort, nur damit die Anfrage vollständig ist; sie muss abgewiesen werden.
+          probe_kw="$(openssl rand -hex 12)"
+          su="$(curl -s -o antwort.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+                -d "{\"email\":\"probe@example.org\",\"password\":\"${probe_kw}\",\"username\":\"probe\"}" \
+                http://localhost:3000/api/auth/signup || true)"
+          echo "Registrierung: $su $(cat antwort.json 2>/dev/null)"
+          if [ "$su" != "403" ] || ! grep -q 'Signup is disabled' antwort.json; then
+            echo "Registrierung ist NICHT aus dem Build gesperrt"
+            docker logs probe 2>&1 | tail -50
+            exit 1
+          fi
+          docker rm -f probe
+
+      - name: Am gebauten Image prüfen (Lizenzhinweis, Google Fonts)
+        run: |
+          docker run --rm --entrypoint test "$BILD" -s /calcom/apps/web/LICENSE.cal.diy \
+            || { echo "MIT-Lizenzhinweis fehlt im Image"; exit 1; }
+          echo "Lizenzhinweis im Image: /calcom/apps/web/LICENSE.cal.diy"
+          if [ "$FONTS_ENTFERNEN" = "true" ]; then
+            docker run --rm --entrypoint sh "$BILD" -c '
+              k="$(grep -rl --include="*.js" "mj-outlook-group-fix" /calcom/apps/web/.next | wc -l)"
+              echo "Kontrolle, Mailkopf im gebauten Code gefunden: $k Dateien"
+              [ "$k" -gt 0 ] || { echo "Mailkopf nicht gefunden, die Prüfung wäre blind"; exit 1; }
+              t="$(grep -rl --include="*.js" "fonts.googleapis.com/css?family=Roboto" /calcom/apps/web/.next | wc -l)"
+              echo "Google-Fonts-Treffer im gebauten Code: $t"
+              if [ "$t" -ne 0 ]; then
+                grep -rl --include="*.js" "fonts.googleapis.com/css?family=Roboto" /calcom/apps/web/.next | head -10
+                exit 1
+              fi
+            '
+          fi
+
+      - name: In ghcr.io ablegen und Digest ausgeben
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+          docker push "$BILD" | tee push.log
+          digest="$(docker buildx imagetools inspect "$BILD" --format '{{.Manifest.Digest}}')"
+          docker logout ghcr.io
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Digest aus der Registry nicht lesbar: $digest"; exit 1; }
+          push_digest="$(grep -o 'digest: sha256:[0-9a-f]\{64\}' push.log | tail -1 | cut -d' ' -f2 || true)"
+          if [ -n "$push_digest" ] && [ "$push_digest" != "$digest" ]; then
+            echo "Digest aus dem Push ($push_digest) weicht von der Registry ($digest) ab"
+            exit 1
+          fi
+          echo "Referenz für Coolify (CALDIY_IMAGE): ${BILD}@${digest}"
+          {
+            echo "### Referenz für Coolify"
+            echo
+            echo "\`CALDIY_IMAGE=${BILD}@${digest}\`"
+            echo
+            echo "Cal.diy-Commit \`${CALDIY_SHA}\`, Google Fonts entfernt: ${FONTS_ENTFERNEN}"
+          } >> "$GITHUB_STEP_SUMMARY"
