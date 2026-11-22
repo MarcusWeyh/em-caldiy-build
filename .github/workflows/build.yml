@@ -38,6 +38,11 @@ on:
         type: boolean
         required: true
         default: true
+      du_fassung:
+        description: "Deutsche Texte in der Du-Form (du/de-du.json dieses Repos über packages/i18n/locales/de/common.json legen). Entscheidung Marcus 22.11.2026."
+        type: boolean
+        required: true
+        default: true
 
 permissions: {}
 
@@ -76,12 +81,14 @@ jobs:
     env:
       BUILD_DB_URL: postgresql://postgres@localhost:5432/calendso
       FONTS_ENTFERNEN: ${{ inputs.google_fonts_entfernen }}
+      DU_FASSUNG: ${{ inputs.du_fassung }}
     steps:
       - name: Pin und feste Werte prüfen
         run: |
           [[ "$CALDIY_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "CALDIY_SHA ist kein voller Commit-SHA"; exit 1; }
           [[ "$WEBAPP_URL" =~ ^https://[a-z0-9.-]+$ ]] || { echo "WEBAPP_URL hat ein unerwartetes Format"; exit 1; }
           [[ "$FONTS_ENTFERNEN" == "true" || "$FONTS_ENTFERNEN" == "false" ]] || { echo "google_fonts_entfernen unerwartet: $FONTS_ENTFERNEN"; exit 1; }
+          [[ "$DU_FASSUNG" == "true" || "$DU_FASSUNG" == "false" ]] || { echo "du_fassung unerwartet: $DU_FASSUNG"; exit 1; }
 
       - name: Platz auf dem Runner schaffen
         # Der Cal.diy-Build braucht viel Platte [ungeprüft, ob es ohne diesen Schritt reicht].
@@ -125,6 +132,38 @@ jobs:
           echo "Weitere Fundstellen unter packages/emails (nur zur Information, nicht verändert):"
           grep -rn 'fonts\.googleapis\.com' packages/emails || echo "keine"
 
+      - name: Eigene Dateien dieses Repos auschecken (Du-Fassung)
+        if: ${{ inputs.du_fassung }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: em-eigen
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Du-Fassung über die deutschen Texte legen
+        # Nur Schlüssel, die es in Cal.diy schon gibt. Ein fremder oder verschwundener Schlüssel
+        # heißt, dass sich Upstream geändert hat: dann Abbruch statt halber Übersetzung.
+        if: ${{ inputs.du_fassung }}
+        run: |
+          python3 - packages/i18n/locales/de/common.json em-eigen/du/de-du.json <<'PY'
+          import json, re, sys
+          ziel, quelle = sys.argv[1], sys.argv[2]
+          de = json.load(open(ziel, encoding="utf-8"))
+          du = json.load(open(quelle, encoding="utf-8"))
+          fremd = [k for k in du if k not in de]
+          if fremd:
+              sys.exit(f"Schlüssel fehlen in Cal.diy: {fremd[:10]} ({len(fremd)})")
+          platz = re.compile(r"\{\{[^}]*\}\}|\$t\([^)]*\)|<[^>]+>")
+          for k, v in du.items():
+              if sorted(platz.findall(de[k])) != sorted(platz.findall(v)):
+                  sys.exit(f"Platzhalter weichen ab: {k}")
+          de.update(du)
+          json.dump(de, open(ziel, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+          rest = [k for k, v in de.items() if isinstance(v, str) and re.search(r"\b(Sie|Ihr|Ihre|Ihren|Ihrem|Ihrer|Ihres|Ihnen)\b", v)]
+          print(f"Du-Fassung: {len(du)} Texte ersetzt, Sie-Form übrig: {len(rest)}")
+          PY
+          rm -rf em-eigen
+
       - name: Öffentliche Build-Werte setzen
         # Nur Werte, die ohnehin im Browser landen. Next.js liest apps/web/.env.production
         # beim Build [ungeprüft für diesen Dockerfile-Ablauf, der Rauchtest prüft die Sperre].
@@ -140,6 +179,7 @@ jobs:
         run: |
           kurz="${CALDIY_SHA:0:8}"
           if [ "$FONTS_ENTFERNEN" = "true" ]; then tag="$kurz"; else tag="${kurz}-mit-google-fonts"; fi
+          if [ "$DU_FASSUNG" = "true" ]; then tag="${tag}-du"; fi
           bild="${IMAGE_NAME}:${tag}"
           echo "BILD=$bild" >> "$GITHUB_ENV"
           docker build --network host \
@@ -154,6 +194,7 @@ jobs:
             --label org.opencontainers.image.licenses=MIT \
             --label "org.opencontainers.image.description=Cal.diy (calcom/cal.diy) für termin.effizienzmaster.de" \
             --label de.effizienzmaster.google-fonts-entfernt="$FONTS_ENTFERNEN" \
+            --label de.effizienzmaster.du-fassung="$DU_FASSUNG" \
             -t "$bild" .
 
       - name: Rauchtest gegen PostgreSQL 18
@@ -194,6 +235,15 @@ jobs:
           docker run --rm --entrypoint test "$BILD" -s /calcom/apps/web/LICENSE.cal.diy \
             || { echo "MIT-Lizenzhinweis fehlt im Image"; exit 1; }
           echo "Lizenzhinweis im Image: /calcom/apps/web/LICENSE.cal.diy"
+          if [ "$DU_FASSUNG" = "true" ]; then
+            # Kontrolltext aus der Du-Fassung muss im gebauten Code stehen, der alte Sie-Text nicht.
+            docker run --rm --entrypoint sh "$BILD" -c '
+              d="$(grep -rlF "Kaufe eine Telefonnummer" /calcom/apps/web/.next | wc -l)"
+              s="$(grep -rlF "Kaufen Sie eine Telefonnummer" /calcom/apps/web/.next | wc -l)"
+              echo "Du-Kontrolltext: $d Dateien, alter Sie-Text: $s Dateien"
+              [ "$d" -gt 0 ] && [ "$s" -eq 0 ] || exit 1
+            '
+          fi
           if [ "$FONTS_ENTFERNEN" = "true" ]; then
             docker run --rm --entrypoint sh "$BILD" -c '
               k="$(grep -rl --include="*.js" "mj-outlook-group-fix" /calcom/apps/web/.next | wc -l)"
