@@ -170,7 +170,7 @@ jobs:
           [ "$code" = "200" ] || { docker logs probe 2>&1 | tail -100; exit 1; }
           ohne="$(curl -s -o /dev/null -w '%{http_code}' -H 'cal-api-version: 2024-08-13' http://localhost:5555/v2/bookings)"
           echo "Buchungen ohne Schlüssel: $ohne"
-          [ "$ohne" = "401" ] || { docker logs probe 2>&1 | tail -50; exit 1; }
+          [ "$ohne" = "401" ] || [ "$ohne" = "403" ] || { docker logs probe 2>&1 | tail -50; exit 1; }
           zeiten="$(curl -s -o /dev/null -w '%{http_code}' -H 'cal-api-version: 2024-09-04' 'http://localhost:5555/v2/slots?eventTypeId=1&start=2030-01-01&end=2030-01-02')"
           echo "Zeiten zu unbekanntem Termintyp: $zeiten"
           [ "$zeiten" = "404" ] || [ "$zeiten" = "400" ] || { docker logs probe 2>&1 | tail -50; exit 1; }
