@@ -1,0 +1,206 @@
+# Baut das Image der Cal.diy-Schnittstelle v2 (apps/api/v2) und legt es in ghcr.io ab.
+# Gleicher Pin, gleiche Patches (Du-Texte, Kalender, ohne Google Fonts) wie build.yml: Die
+# Schnittstelle legt Buchungen an und verschickt dabei dieselben Mails und Kalendereinträge.
+# KEINE Deploy-Datei. Keine Geheimnisse außer dem automatischen GITHUB_TOKEN im letzten Schritt.
+# CALDIY_SHA hier und in build.yml immer gemeinsam ändern (geprüft im ersten Schritt).
+#
+# Grün bleibt dieser Lauf fälschlich, wenn eine Buchung über die Schnittstelle scheitert: Der
+# Rauchtest prüft Start, Erreichbarkeit und Anmeldepflicht, keine Buchung.
+
+name: Cal.diy-Schnittstelle v2 bauen
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: caldiy-api-v2
+  cancel-in-progress: false
+
+env:
+  CALDIY_SHA: ae027bb70e694e2d2c44569f398d6cbcee0389b1
+  IMAGE_NAME: ghcr.io/marcusweyh/em-caldiy-api
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bauen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    services:
+      datenbank:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: calendso
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:8.12
+        ports:
+          - 6379:6379
+    env:
+      BUILD_DB_URL: postgresql://postgres@localhost:5432/calendso
+    steps:
+      - name: Platz auf dem Runner schaffen
+        # Der Cal.diy-Build braucht viel Platte [ungeprüft, ob es ohne diesen Schritt reicht].
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h /
+
+      - name: Cal.diy auschecken (fester Commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: calcom/cal.diy
+          ref: ${{ env.CALDIY_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Commit und Lizenz prüfen, Lizenzhinweis ins Image legen
+        run: |
+          test "$(git rev-parse HEAD)" = "$CALDIY_SHA" || { echo "Ausgecheckter Stand ist nicht CALDIY_SHA"; exit 1; }
+          head -1 LICENSE | grep -q "MIT License" || { echo "Lizenz ist nicht MIT"; exit 1; }
+          # Das Dockerfile kopiert die LICENSE aus der Wurzel nicht ins Image, apps/web dagegen ganz.
+          # MIT verlangt den Hinweis in jeder Kopie, das Image ist öffentlich.
+          cp LICENSE apps/api/v2/LICENSE.cal.diy
+
+      - name: Google Fonts aus den Mailvorlagen entfernen
+        run: |
+          f=packages/emails/src/components/EmailHead.tsx
+          test -f "$f" || { echo "$f fehlt, Upstream hat sich geändert. Patch prüfen."; exit 1; }
+          vorher="$(grep -c 'fonts\.googleapis\.com' "$f" || true)"
+          sed -i \
+            -e 's#<link href="https://fonts\.googleapis\.com/[^"]*" rel="stylesheet" type="text/css"/>##' \
+            -e 's#<style type="text/css">@import url(https://fonts\.googleapis\.com/[^)]*);</style>##' \
+            "$f"
+          if grep -n 'fonts\.googleapis\.com' "$f"; then
+            echo "fonts.googleapis.com steht noch in $f. Abbruch."
+            exit 1
+          fi
+          echo "Treffer in $f vorher: $vorher, nachher: 0"
+          git --no-pager diff -- "$f"
+          echo "Weitere Fundstellen unter packages/emails (nur zur Information, nicht verändert):"
+          grep -rn 'fonts\.googleapis\.com' packages/emails || echo "keine"
+
+      - name: Eigene Dateien dieses Repos auschecken (Du-Fassung, Kalender-Patch)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: em-eigen
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Du-Fassung über die deutschen Texte legen
+        # Nur Schlüssel, die es in Cal.diy schon gibt. Ein fremder oder verschwundener Schlüssel
+        # heißt, dass sich Upstream geändert hat: dann Abbruch statt halber Übersetzung.
+        run: |
+          python3 - packages/i18n/locales/de/common.json em-eigen/du/de-du.json <<'PY'
+          import json, re, sys
+          ziel, quelle = sys.argv[1], sys.argv[2]
+          de = json.load(open(ziel, encoding="utf-8"))
+          du = json.load(open(quelle, encoding="utf-8"))
+          fremd = [k for k in du if k not in de]
+          if fremd:
+              sys.exit(f"Schlüssel fehlen in Cal.diy: {fremd[:10]} ({len(fremd)})")
+          platz = re.compile(r"\{\{[^}]*\}\}|\$t\([^)]*\)|<[^>]+>")
+          for k, v in du.items():
+              if sorted(platz.findall(de[k])) != sorted(platz.findall(v)):
+                  sys.exit(f"Platzhalter weichen ab: {k}")
+          de.update(du)
+          json.dump(de, open(ziel, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+          rest = [k for k, v in de.items() if isinstance(v, str) and re.search(r"\b(Sie|Ihr|Ihre|Ihren|Ihrem|Ihrer|Ihres|Ihnen)\b", v)]
+          print(f"Du-Fassung: {len(du)} Texte ersetzt, Sie-Form übrig: {len(rest)}")
+          PY
+
+      - name: Google-Kalender, Meet-Link-Nachtrag mit Wiederholung (immer)
+        # Ohne den Patch verliert eine Buchung ihre Google-Termin-ID, sobald der Nachtrag des
+        # Meet-Links scheitert, und Verschieben oder Absagen erreicht den Termin nicht mehr.
+        # Begründung im Kopf von kalender/meet-nachtrag.py.
+        run: |
+          f=packages/app-store/googlecalendar/lib/CalendarService.ts
+          python3 em-eigen/kalender/meet-nachtrag.py "$f"
+          git --no-pager diff --stat -- "$f"
+          grep -q "CALDIY_SHA: $CALDIY_SHA" em-eigen/.github/workflows/build.yml || { echo "Pin weicht von build.yml ab"; exit 1; }
+          rm -rf em-eigen
+
+      - name: Image bauen
+        run: |
+          bild="${IMAGE_NAME}:${CALDIY_SHA:0:8}-du-kal1"
+          echo "BILD=$bild" >> "$GITHUB_ENV"
+          docker build --network host -f apps/api/v2/Dockerfile \
+            --build-arg DATABASE_URL="$BUILD_DB_URL" --build-arg DATABASE_DIRECT_URL="$BUILD_DB_URL" \
+            --label org.opencontainers.image.source=https://github.com/MarcusWeyh/em-caldiy-build \
+            --label org.opencontainers.image.revision="$CALDIY_SHA" \
+            --label org.opencontainers.image.licenses=MIT \
+            --label "org.opencontainers.image.description=Cal.diy Schnittstelle v2 für termin.effizienzmaster.de" \
+            -t "$bild" .
+
+      - name: Rauchtest
+        run: |
+          docker run --rm --network host -e DATABASE_URL="$BUILD_DB_URL" -e DATABASE_DIRECT_URL="$BUILD_DB_URL" --entrypoint sh "$BILD" \
+            -c 'yarn workspace @calcom/prisma prisma migrate deploy' 2>&1 | tail -5
+          # Die Schnittstelle startet nur mit Werten für Stripe, benutzt wird es nicht: Wegwerfwerte.
+          for n in STRIPE_API_KEY STRIPE_WEBHOOK_SECRET; do echo "$n=$(openssl rand -hex 12)"; done > probe.env
+          docker run -d --name probe --network host \
+            -e NODE_ENV=production -e API_PORT=5555 -e API_URL=http://localhost \
+            -e DATABASE_URL="$BUILD_DB_URL" -e DATABASE_DIRECT_URL="$BUILD_DB_URL" \
+            -e DATABASE_READ_URL="$BUILD_DB_URL" -e DATABASE_WRITE_URL="$BUILD_DB_URL" \
+            -e REDIS_URL=redis://localhost:6379 -e ENABLE_SLOTS_WORKERS=false \
+            -e NEXTAUTH_SECRET="$(openssl rand -base64 32)" -e JWT_SECRET="$(openssl rand -base64 32)" \
+            -e CALENDSO_ENCRYPTION_KEY="$(openssl rand -hex 16)" \
+            --env-file probe.env \
+            -e WEB_APP_URL=https://termin.effizienzmaster.de -e NEXT_PUBLIC_WEBAPP_URL=https://termin.effizienzmaster.de \
+            -e API_KEY_PREFIX=cal_ -e LOG_LEVEL=WARN "$BILD"
+          code=""
+          for i in $(seq 1 60); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5555/health || true)"
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          echo "health: $code"
+          [ "$code" = "200" ] || { docker logs probe 2>&1 | tail -100; exit 1; }
+          ohne="$(curl -s -o /dev/null -w '%{http_code}' -H 'cal-api-version: 2024-08-13' http://localhost:5555/v2/bookings)"
+          echo "Buchungen ohne Schlüssel: $ohne"
+          [ "$ohne" = "401" ] || { docker logs probe 2>&1 | tail -50; exit 1; }
+          zeiten="$(curl -s -o /dev/null -w '%{http_code}' -H 'cal-api-version: 2024-09-04' 'http://localhost:5555/v2/slots?eventTypeId=1&start=2030-01-01&end=2030-01-02')"
+          echo "Zeiten zu unbekanntem Termintyp: $zeiten"
+          [ "$zeiten" = "404" ] || [ "$zeiten" = "400" ] || { docker logs probe 2>&1 | tail -50; exit 1; }
+          docker rm -f probe
+
+      - name: Am gebauten Image prüfen
+        run: |
+          docker run --rm --entrypoint test "$BILD" -s /calcom/apps/api/v2/LICENSE.cal.diy || { echo "MIT-Lizenzhinweis fehlt"; exit 1; }
+          docker run --rm --entrypoint sh "$BILD" -c 'k="$(grep -rlF "EM-Patch: Meet-Link-Nachtrag" /calcom/packages/platform/libraries/dist /calcom/apps/api/v2/dist 2>/dev/null | wc -l)"; echo "Kalender-Patch im gebauten Code: $k"; [ "$k" -gt 0 ]'
+
+      - name: In ghcr.io ablegen und Digest ausgeben
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+          docker push "$BILD" | tee push.log
+          digest="$(docker buildx imagetools inspect "$BILD" --format '{{.Manifest.Digest}}')"
+          docker logout ghcr.io
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Digest aus der Registry nicht lesbar: $digest"; exit 1; }
+          push_digest="$(grep -o 'digest: sha256:[0-9a-f]\{64\}' push.log | tail -1 | cut -d' ' -f2 || true)"
+          if [ -n "$push_digest" ] && [ "$push_digest" != "$digest" ]; then
+            echo "Digest aus dem Push ($push_digest) weicht von der Registry ($digest) ab"
+            exit 1
+          fi
+          echo "Referenz für Coolify (CALDIY_API_IMAGE): ${BILD}@${digest}"
+          {
+            echo "### Referenz für Coolify"
+            echo
+            echo "\`CALDIY_API_IMAGE=${BILD}@${digest}\`"
+            echo
+            echo "Cal.diy-Commit \`${CALDIY_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
