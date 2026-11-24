@@ -51,8 +51,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # calcom/cal.diy, Zweig main, Stand 03.11.2026 ("chore(atoms): stop publishing @calcom/atoms from cal.diy (#30445)")
-  CALDIY_SHA: 2eb48eccd8aca8a0c0ffabf28cf92e298b33ecee
+  # calcom/cal.diy, Zweig main, Stand 13.11.2026 ("chore: remove unused support chat env vars from .env.example (#30478)")
+  CALDIY_SHA: ae027bb70e694e2d2c44569f398d6cbcee0389b1
   WEBAPP_URL: https://termin.effizienzmaster.de
   IMAGE_NAME: ghcr.io/marcusweyh/em-caldiy
 

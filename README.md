@@ -13,9 +13,9 @@ Für Cal.diy gibt es kein öffentliches Image (Stand 09.11.2026: Docker Hub `cal
 | | |
 |---|---|
 | Upstream | `github.com/calcom/cal.diy`, Zweig `main` |
-| Commit | `2eb48eccd8aca8a0c0ffabf28cf92e298b33ecee` |
+| Commit | `ae027bb70e694e2d2c44569f398d6cbcee0389b1` |
 | Datum | 03.11.2026 (neuester Stand von `main` am 09.11.2026) |
-| Image-Tag | `ghcr.io/marcusweyh/em-caldiy:2eb48ecc` |
+| Image-Tag | `ghcr.io/marcusweyh/em-caldiy:ae027bb7` |
 
 Cal.diy hat seit dem Wechsel von Cal.com keine Release-Tags. Gepinnt wird deshalb auf den vollen Commit, nie auf `main`. Der Pin steht als `CALDIY_SHA` in `.github/workflows/build.yml`.
 

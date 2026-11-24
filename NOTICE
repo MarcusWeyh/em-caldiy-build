@@ -5,7 +5,7 @@ Dieses Repo enthält nur einen Build-Workflow und Dokumentation. Es enthält kei
 Quelltext von Cal.diy. Das gebaute Image ghcr.io/marcusweyh/em-caldiy enthält Cal.diy:
 
   Cal.diy, https://github.com/calcom/cal.diy
-  Commit 2eb48eccd8aca8a0c0ffabf28cf92e298b33ecee (03.11.2026)
+  Commit ae027bb70e694e2d2c44569f398d6cbcee0389b1 (13.11.2026)
   Lizenz: MIT
 
 Änderungen im Image gegenüber diesem Commit:
