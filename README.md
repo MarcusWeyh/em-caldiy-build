@@ -31,9 +31,10 @@ Nur öffentliche Werte, die ohnehin im Browser der Besucher landen:
 
 Keine Geheimnisse. `NEXTAUTH_SECRET` und `CALENDSO_ENCRYPTION_KEY` bleiben beim Build auf den Platzhaltern des Upstream-Dockerfiles; die echten Werte setzt Coolify zur Laufzeit. Der Workflow nutzt nur das automatische `GITHUB_TOKEN`, und nur im letzten Schritt für den Push.
 
-Zwei Änderungen am Upstream-Stand:
+Drei Änderungen am Upstream-Stand:
 
 1. **Google Fonts in den Mails** (Eingang `google_fonts_entfernen`, Standard ja): Die Einbindung von `fonts.googleapis.com` in `packages/emails/src/components/EmailHead.tsx` wird entfernt, damit das Mailprogramm der Empfänger keine Verbindung zu Google aufbaut. Der Workflow prüft das in der Datei und im gebauten Image. Mit `false` gebaut, heißt der Tag `<kurz>-mit-google-fonts`. Die Entscheidung liegt bei Marcus.
+3. **Google-Kalender** (immer, `kalender/meet-nachtrag.py`): Scheitert nach dem Anlegen eines Termins der Nachtrag des Meet-Links (gemessen 23.11.2026: Google meldet `rateLimitExceeded`), verlor Cal.diy die Google-Termin-ID, und Verschieben oder Absagen erreichte den Termin nicht mehr. Der Patch wiederholt den Nachtrag bis zu dreimal und behält die ID in jedem Fall. Der Tag trägt dafür die Endung `-kal1`.
 2. **Lizenzhinweis:** Die MIT-Lizenz von Cal.diy wird als `/calcom/apps/web/LICENSE.cal.diy` ins Image gelegt, weil das Upstream-Dockerfile die Lizenzdatei nicht mitkopiert.
 
 ## Prüfungen im Lauf

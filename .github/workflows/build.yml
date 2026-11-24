@@ -132,8 +132,7 @@ jobs:
           echo "Weitere Fundstellen unter packages/emails (nur zur Information, nicht verändert):"
           grep -rn 'fonts\.googleapis\.com' packages/emails || echo "keine"
 
-      - name: Eigene Dateien dieses Repos auschecken (Du-Fassung)
-        if: ${{ inputs.du_fassung }}
+      - name: Eigene Dateien dieses Repos auschecken (Du-Fassung, Kalender-Patch)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: em-eigen
@@ -162,6 +161,15 @@ jobs:
           rest = [k for k, v in de.items() if isinstance(v, str) and re.search(r"\b(Sie|Ihr|Ihre|Ihren|Ihrem|Ihrer|Ihres|Ihnen)\b", v)]
           print(f"Du-Fassung: {len(du)} Texte ersetzt, Sie-Form übrig: {len(rest)}")
           PY
+
+      - name: Google-Kalender, Meet-Link-Nachtrag mit Wiederholung (immer)
+        # Ohne den Patch verliert eine Buchung ihre Google-Termin-ID, sobald der Nachtrag des
+        # Meet-Links scheitert, und Verschieben oder Absagen erreicht den Termin nicht mehr.
+        # Begründung im Kopf von kalender/meet-nachtrag.py.
+        run: |
+          f=packages/app-store/googlecalendar/lib/CalendarService.ts
+          python3 em-eigen/kalender/meet-nachtrag.py "$f"
+          git --no-pager diff --stat -- "$f"
           rm -rf em-eigen
 
       - name: Öffentliche Build-Werte setzen
@@ -180,6 +188,8 @@ jobs:
           kurz="${CALDIY_SHA:0:8}"
           if [ "$FONTS_ENTFERNEN" = "true" ]; then tag="$kurz"; else tag="${kurz}-mit-google-fonts"; fi
           if [ "$DU_FASSUNG" = "true" ]; then tag="${tag}-du"; fi
+          # Stand der eigenen Patches, bei jeder Änderung an kalender/ hochzählen.
+          tag="${tag}-kal1"
           bild="${IMAGE_NAME}:${tag}"
           echo "BILD=$bild" >> "$GITHUB_ENV"
           docker build --network host \
@@ -235,6 +245,12 @@ jobs:
           docker run --rm --entrypoint test "$BILD" -s /calcom/apps/web/LICENSE.cal.diy \
             || { echo "MIT-Lizenzhinweis fehlt im Image"; exit 1; }
           echo "Lizenzhinweis im Image: /calcom/apps/web/LICENSE.cal.diy"
+          # Kalender-Patch muss im gebauten Servercode stehen.
+          docker run --rm --entrypoint sh "$BILD" -c '
+            k="$(grep -rlF "EM-Patch: Meet-Link-Nachtrag" /calcom/apps/web/.next | wc -l)"
+            echo "Kalender-Patch im gebauten Code: $k Dateien"
+            [ "$k" -gt 0 ] || exit 1
+          '
           if [ "$DU_FASSUNG" = "true" ]; then
             # Kontrolltext aus der Du-Fassung muss im gebauten Code stehen, der alte Sie-Text nicht.
             docker run --rm --entrypoint sh "$BILD" -c '
