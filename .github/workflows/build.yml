@@ -195,7 +195,7 @@ jobs:
           if [ "$FONTS_ENTFERNEN" = "true" ]; then tag="$kurz"; else tag="${kurz}-mit-google-fonts"; fi
           if [ "$DU_FASSUNG" = "true" ]; then tag="${tag}-du"; fi
           # Stand der eigenen Patches, bei jeder Änderung an kalender/ oder ohne-calcom/ hochzählen.
-          tag="${tag}-kal1-oc1"
+          tag="${tag}-kal1-oc2"
           bild="${IMAGE_NAME}:${tag}"
           echo "BILD=$bild" >> "$GITHUB_ENV"
           docker build --network host \

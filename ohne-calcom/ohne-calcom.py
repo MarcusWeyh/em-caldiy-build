@@ -13,7 +13,7 @@ SEITE = "https://effizienzmaster.de"
 WISSEN = f"{SEITE}/wissen/"
 TERMIN = "https://termin.effizienzmaster.de/marcus/erstgespraech"
 LINKEDIN = "https://www.linkedin.com/in/marcus-weyh-effizienzmaster/"
-MAIL = "info@effizienzmaster.de"
+MAIL = "termin@effizienzmaster.de"
 
 
 def lesen(rel):
