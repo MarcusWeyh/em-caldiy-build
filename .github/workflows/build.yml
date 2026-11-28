@@ -132,7 +132,7 @@ jobs:
           echo "Weitere Fundstellen unter packages/emails (nur zur Information, nicht verändert):"
           grep -rn 'fonts\.googleapis\.com' packages/emails || echo "keine"
 
-      - name: Eigene Dateien dieses Repos auschecken (Du-Fassung, Kalender-Patch)
+      - name: Eigene Dateien dieses Repos auschecken (Du-Fassung, Kalender-Patch, ohne cal.com)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: em-eigen
@@ -170,6 +170,12 @@ jobs:
           f=packages/app-store/googlecalendar/lib/CalendarService.ts
           python3 em-eigen/kalender/meet-nachtrag.py "$f"
           git --no-pager diff --stat -- "$f"
+
+      - name: Verweise auf cal.com entfernen (404-Seite, Bestätigungsseite, Metadaten, Konstanten)
+        # Entscheidung Marcus 28.11.2026. Das Skript bricht ab, wenn Upstream eine der Stellen geändert hat.
+        run: |
+          python3 em-eigen/ohne-calcom/ohne-calcom.py .
+          git --no-pager diff --stat
           rm -rf em-eigen
 
       - name: Öffentliche Build-Werte setzen
@@ -188,8 +194,8 @@ jobs:
           kurz="${CALDIY_SHA:0:8}"
           if [ "$FONTS_ENTFERNEN" = "true" ]; then tag="$kurz"; else tag="${kurz}-mit-google-fonts"; fi
           if [ "$DU_FASSUNG" = "true" ]; then tag="${tag}-du"; fi
-          # Stand der eigenen Patches, bei jeder Änderung an kalender/ hochzählen.
-          tag="${tag}-kal1"
+          # Stand der eigenen Patches, bei jeder Änderung an kalender/ oder ohne-calcom/ hochzählen.
+          tag="${tag}-kal1-oc1"
           bild="${IMAGE_NAME}:${tag}"
           echo "BILD=$bild" >> "$GITHUB_ENV"
           docker build --network host \
@@ -250,6 +256,13 @@ jobs:
             k="$(grep -rlF "EM-Patch: Meet-Link-Nachtrag" /calcom/apps/web/.next | wc -l)"
             echo "Kalender-Patch im gebauten Code: $k Dateien"
             [ "$k" -gt 0 ] || exit 1
+          '
+          # Patch ohne cal.com: neue 404-Einträge im gebauten Code, kein Link auf die cal.com-Dokumentation im Browsercode.
+          docker run --rm --entrypoint sh "$BILD" -c '
+            d="$(grep -rlF "Buche dein Erstgespräch mit Marcus." /calcom/apps/web/.next | wc -l)"
+            c="$(grep -rlF "https://cal.com/docs\"" /calcom/apps/web/.next/static | wc -l)"
+            echo "Neue 404-Einträge: $d Dateien, cal.com/docs im Browsercode: $c Dateien"
+            [ "$d" -gt 0 ] && [ "$c" -eq 0 ] || exit 1
           '
           if [ "$DU_FASSUNG" = "true" ]; then
             # Kontrolltext aus der Du-Fassung muss im gebauten Code stehen, der alte Sie-Text nicht.
